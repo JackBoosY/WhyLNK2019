@@ -6,9 +6,11 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+#include <map>
 
 typedef PVOID(CALLBACK* PFNEXPORTFUNC) (PIMAGE_NT_HEADERS, PVOID, ULONG, PIMAGE_SECTION_HEADER*);
 
+// Get All Symbols in the library.
 bool GetAllSymbols(const char* fileName, std::vector<std::string>& symbolList)
 {
 	LPWIN32_FIND_DATA lpwfd_first = new WIN32_FIND_DATA;
@@ -83,6 +85,55 @@ bool GetAllSymbols(const char* fileName, std::vector<std::string>& symbolList)
 	return true;
 }
 
+// Test symbols whose link failure in library.
+void TryToLinkFuctions(const char* fileName, const char* functions, std::map<std::string, bool>& resultMap)
+{
+	std::map<std::string, bool> realNameMap, fakeNameMap;
+
+	// Handle the function names.
+	const char* pName = functions;
+	std::string fullName;
+	while (*pName != '\0')
+	{
+		if (*pName == ';')
+		{
+			realNameMap.insert(std::pair<std::string, bool>(fullName, false));
+			fullName.clear();
+		}
+		else
+		{
+			fullName.append(1, (char)*pName);
+		}
+		pName++;
+	}
+	
+	for (auto i = realNameMap.begin(); i != realNameMap.end(); i++)
+	{
+		fakeNameMap.insert(std::pair<std::string, bool>(i->first, false));
+	}
+
+	HMODULE hHandle = ::LoadLibrary(fileName);
+	if (hHandle)
+	{
+		// Start load functions.
+		for (auto i = fakeNameMap.begin(); i != fakeNameMap.end(); i++)
+		{
+			i->second = (::GetProcAddress(hHandle, i->first.c_str()) != nullptr);
+		}
+		// Copy result.
+		for (auto i = realNameMap.begin(), j = fakeNameMap.begin(); i != realNameMap.end(), j != fakeNameMap.end(); i++, j++)
+		{
+			i->second = j->second;
+		}
+
+		::FreeLibrary(hHandle);
+	}
+
+	resultMap.swap(realNameMap);
+
+	return;
+}
+
 int main(int argc, char** argv)
 {
 	const char* pszLibName = argv[1];
@@ -94,10 +145,17 @@ int main(int argc, char** argv)
 	strLibFullPath += pszLibName;
 
 	std::vector<std::string> symbolList;
+	// Get Library Symbols.
+	if (!GetAllSymbols(strLibFullPath.c_str(), symbolList))
+	{
+		return -1;
+	}
 
-	GetAllSymbols(strLibFullPath.c_str(), symbolList);
+	// Retry link to the library and collect results.
+	std::map<std::string, bool> resultMap;
+	TryToLinkFuctions(strLibFullPath.c_str(), pszFucntionsName, resultMap);
 
-
+	// Generate results to json file.
 
 	return 0;
 }
