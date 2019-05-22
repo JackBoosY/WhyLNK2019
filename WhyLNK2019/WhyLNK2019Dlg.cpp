@@ -9,6 +9,7 @@
 
 #include <process.h>
 #include <vector>
+#include <windows.h>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -138,7 +139,17 @@ BOOL CWhyLNK2019Dlg::AnaylsisErrors(std::map<CString, CString>& functions)
 	}
 
 	//Analysis each error line
-	functions;
+	for (auto i = 0; i < strLines.size(); i++)
+	{
+		CString strErr = strLines[i];
+		CString strFuncName;
+		int iBegin = strErr.Find(L"unresolved external symbol ");
+		iBegin += CString(L"unresolved external symbol ").GetLength();
+		int iEnd = strErr.Find(L" ", iBegin);
+		strFuncName = strErr.Mid(iBegin, iEnd - iBegin);
+		functions[strFuncName] = "";
+
+	}
 
 	return TRUE;
 }
@@ -238,26 +249,78 @@ void CWhyLNK2019Dlg::OnBnClickedButtonRun()
 		break;
 	}
 
-	CString strFunctions = L";";
+	CString strFunctions;
 	for (std::map<CString, CString>::iterator i = m_errorMap.begin(); i != m_errorMap.end(); i++)
 	{
 		strFunctions += i->first;
 		strFunctions += ";";
 	}
-	try
-	{
-		if (-1 == _wexecl((LPCTSTR)strExeName, (LPCTSTR)m_strLibname, (LPCTSTR)m_strLibpath, (LPCTSTR)strFunctions, 0x0))
-		{
-			int iError = GetLastError();
-			return;
-		}
-	}
-	catch (const std::exception&)
-	{
-		return;
-	}
+
+	// Launch analysis exe
 	m_arch; m_tarArch;
 
+	CString strCmd;
+	//strCmd += strExeName;
+	strCmd += " \"";
+	strCmd += m_strLibname;
+	strCmd += "\" \"";
+	strCmd += m_strLibpath;
+	strCmd += "\" \"";
+	strCmd += strFunctions;
+	strCmd += "\"";
+
+	STARTUPINFO si = { sizeof(si) };
+	memset(&si, 0, sizeof(STARTUPINFO));
+	PROCESS_INFORMATION info;
+	memset(&info, 0, sizeof(PROCESS_INFORMATION));
+	if (!::CreateProcessW(strExeName, (LPWSTR)(LPCTSTR)strCmd, NULL, NULL, FALSE, NULL/*CREATE_NO_WINDOW*/, NULL, NULL, &si, &info))
+	{
+		int i = GetLastError();
+		return;
+	}
+
+	// Connect to pipe
+	HANDLE hPipe = INVALID_HANDLE_VALUE;
+	hPipe = CreateFile(L"\\\\.\\pipe\\WhyLNK2019", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+
+	if (hPipe == INVALID_HANDLE_VALUE)
+	{
+		printf("Create File error: %d", GetLastError());
+		return;
+	}
+
+	wchar_t* wCmd = NULL;
+	while (true)
+	{
+		char szBufRecv[1024] = { 0 };
+		DWORD dwReadSize = 0;
+		BOOL bRet = ::ReadFile(hPipe, szBufRecv, 1024, &dwReadSize, NULL);
+		if (!bRet || dwReadSize == 0)
+		{
+			DWORD dwLastError = ::GetLastError();
+			if (dwLastError == ERROR_PIPE_LISTENING)
+				continue;
+			else
+			{
+				::CloseHandle(hPipe);
+				m_editResult.SetWindowTextW(L"analysis failed: Read result failed.");
+				return;
+			}
+		}
+		if (dwReadSize)
+		{
+			CloseHandle(hPipe);
+			const size_t cSize = strlen(szBufRecv) + 1;
+			wCmd = new wchar_t[cSize];
+			mbstowcs(wCmd, szBufRecv, cSize);
+			break;
+		}
+
+	}
+
 	// Output results
-	m_editResult.SetWindowTextW(L"analysis success:");
+	CString strOut = L"analysis success:";
+	strOut += wCmd;
+	delete[] wCmd;
+	m_editResult.SetWindowTextW(strOut);
 }

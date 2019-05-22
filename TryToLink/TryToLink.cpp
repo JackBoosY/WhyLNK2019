@@ -7,6 +7,11 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <sstream>
+#include <windows.h>
+#include <json/json.h>
+
+#include <process.h>
 
 typedef PVOID(CALLBACK* PFNEXPORTFUNC) (PIMAGE_NT_HEADERS, PVOID, ULONG, PIMAGE_SECTION_HEADER*);
 
@@ -86,9 +91,9 @@ bool GetAllSymbols(const char* fileName, std::vector<std::string>& symbolList)
 }
 
 // Test symbols whose link failure in library.
-void TryToLinkFuctions(const char* fileName, const char* functions, std::map<std::string, bool>& resultMap)
+int TryToLinkFuctions(const char* fileName, const char* functions, std::map<std::string, bool>& resultMap)
 {
-	std::map<std::string, bool> realNameMap, fakeNameMap;
+	std::map<std::string, bool> realNameMap;
 
 	// Handle the function names.
 	const char* pName = functions;
@@ -106,32 +111,28 @@ void TryToLinkFuctions(const char* fileName, const char* functions, std::map<std
 		}
 		pName++;
 	}
-	
-	for (auto i = realNameMap.begin(); i != realNameMap.end(); i++)
-	{
-		fakeNameMap.insert(std::pair<std::string, bool>(i->first, false));
-	}
 
 	HMODULE hHandle = ::LoadLibrary(fileName);
 	if (hHandle)
 	{
 		// Start load functions.
-		for (auto i = fakeNameMap.begin(); i != fakeNameMap.end(); i++)
+		for (auto i = realNameMap.begin(); i != realNameMap.end(); i++)
 		{
 			i->second = (::GetProcAddress(hHandle, i->first.c_str()) != nullptr);
-		}
-		// Copy result.
-		for (auto i = realNameMap.begin(), j = fakeNameMap.begin(); i != realNameMap.end(), j != fakeNameMap.end(); i++, j++)
-		{
-			i->second = j->second;
 		}
 
 		::FreeLibrary(hHandle);
 	}
+	else
+	{
+		int iError = GetLastError();
+		printf("Load library failed: %d\nMissing dependence library.", iError);
+		return iError;
+	}
 
 	resultMap.swap(realNameMap);
 
-	return;
+	return 0;
 }
 
 int main(int argc, char** argv)
@@ -148,14 +149,56 @@ int main(int argc, char** argv)
 	// Get Library Symbols.
 	if (!GetAllSymbols(strLibFullPath.c_str(), symbolList))
 	{
+		printf("Get symbols failed.");
+		system("pause");
 		return -1;
 	}
 
 	// Retry link to the library and collect results.
 	std::map<std::string, bool> resultMap;
-	TryToLinkFuctions(strLibFullPath.c_str(), pszFucntionsName, resultMap);
+	int iRes = TryToLinkFuctions(strLibFullPath.c_str(), pszFucntionsName, resultMap);
 
 	// Generate results to json file.
+	Json::Value root, result;
+	for (auto i = resultMap.begin(); i != resultMap.end(); i++)
+	{
+		result[i->first] = i->second;
+	}
+	root["Ret"] = iRes;
+	root["Result"] = result;
+
+	std::ostringstream ss;
+	Json::StreamWriterBuilder writer;
+	std::unique_ptr<Json::StreamWriter> write(writer.newStreamWriter());
+	write->write(root, &ss);
+
+	// Transform to caller
+	// Connect to pipe
+	HANDLE hPipe = INVALID_HANDLE_VALUE, hThread = NULL;
+	hPipe = CreateNamedPipe("\\\\.\\pipe\\WhyLNK2019", PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE
+		| PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 2048, 2048, 0, NULL);
+	if (hPipe == INVALID_HANDLE_VALUE)
+	{
+		printf("Create Pipe failed: %d", GetLastError());
+		system("pause");
+		return -1;
+	}
+	// Wait for connect
+	ConnectNamedPipe(hPipe, NULL);
+	// Send result
+	DWORD dwWritten = 0;
+	BOOL bRet = WriteFile(hPipe, ss.str().c_str(), ss.str().length() + 1, &dwWritten, NULL);
+	if (!bRet || dwWritten == 0)
+	{
+		printf("WriteFile failed: %d", GetLastError());
+		system("pause");
+		return -1;
+	}
+
+	// Pipe should close by client
+	//::CloseHandle(hPipe);
+
+	system("pause");
 
 	return 0;
 }
