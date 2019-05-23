@@ -11,8 +11,6 @@
 #include <windows.h>
 #include <json/json.h>
 
-#include <process.h>
-
 typedef PVOID(CALLBACK* PFNEXPORTFUNC) (PIMAGE_NT_HEADERS, PVOID, ULONG, PIMAGE_SECTION_HEADER*);
 
 // Get All Symbols in the library.
@@ -137,26 +135,79 @@ int TryToLinkFuctions(const char* fileName, const char* functions, std::map<std:
 
 int main(int argc, char** argv)
 {
-	const char* pszLibName = argv[1];
-	const char* pszLibPath = argv[2];
-	const char* pszFucntionsName = argv[3];
+	// Connect to pipe
+	HANDLE hPipe = INVALID_HANDLE_VALUE;
+	hPipe = CreateNamedPipe("\\\\.\\pipe\\WhyLNK2019", PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE
+		| PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 2048, 2048, 0, NULL);
+	if (hPipe == INVALID_HANDLE_VALUE)
+	{
+		printf("Create Pipe failed: %d", GetLastError());
+		return -1;
+	}
+	// Wait for connect
+	printf("Waiting for connect...\n");
+	ConnectNamedPipe(hPipe, NULL);
 
-	std::string strLibFullPath = pszLibPath;
+	// Read params
+	std::string strParams;
+	char szBufRecv[1024] = { 0 };
+	DWORD dwReadSize = 0;
+	while (true)
+	{
+		memset(szBufRecv, 1024, 0);
+		BOOL bRet = ::ReadFile(hPipe, szBufRecv, 1024, &dwReadSize, NULL);
+		if (!bRet)
+		{
+			DWORD dwLastError = ::GetLastError();
+			if (dwLastError == ERROR_PIPE_LISTENING)
+				continue;
+			else
+			{
+				break;
+			}
+		}
+		else if (dwReadSize == 0 || dwReadSize < 1024)
+		{
+			strParams += szBufRecv;
+			break;
+		}
+		else
+		{
+			printf("Reciving params...\n");
+			strParams += szBufRecv;
+		}
+	}
+	Json::Value vRoot;
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+
+	std::istringstream ifs(strParams);
+	std::string strError;
+	printf("Parsing params...\n");
+	if (!parseFromStream(builder, ifs, &vRoot, &strError))
+	{
+		printf("parse params failed.");
+		::CloseHandle(hPipe);
+		return 0;
+	}
+
+	// Get Library Symbols.
+	std::string strLibFullPath = vRoot["libPath"].asCString();
 	strLibFullPath += "\\";
-	strLibFullPath += pszLibName;
+	strLibFullPath += vRoot["libName"].asCString();
 
 	std::vector<std::string> symbolList;
-	// Get Library Symbols.
+	printf("Get library symbols...\n");
 	if (!GetAllSymbols(strLibFullPath.c_str(), symbolList))
 	{
 		printf("Get symbols failed.");
-		system("pause");
 		return -1;
 	}
 
 	// Retry link to the library and collect results.
 	std::map<std::string, bool> resultMap;
-	int iRes = TryToLinkFuctions(strLibFullPath.c_str(), pszFucntionsName, resultMap);
+	printf("Retry library symbols...\n");
+	int iRes = TryToLinkFuctions(strLibFullPath.c_str(), vRoot["Functions"].asCString(), resultMap);
 
 	// Generate results to json file.
 	Json::Value root, result;
@@ -173,32 +224,31 @@ int main(int argc, char** argv)
 	write->write(root, &ss);
 
 	// Transform to caller
-	// Connect to pipe
-	HANDLE hPipe = INVALID_HANDLE_VALUE, hThread = NULL;
-	hPipe = CreateNamedPipe("\\\\.\\pipe\\WhyLNK2019", PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE
-		| PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 2048, 2048, 0, NULL);
-	if (hPipe == INVALID_HANDLE_VALUE)
-	{
-		printf("Create Pipe failed: %d", GetLastError());
-		system("pause");
-		return -1;
-	}
-	// Wait for connect
-	ConnectNamedPipe(hPipe, NULL);
 	// Send result
 	DWORD dwWritten = 0;
 	BOOL bRet = WriteFile(hPipe, ss.str().c_str(), ss.str().length() + 1, &dwWritten, NULL);
 	if (!bRet || dwWritten == 0)
 	{
 		printf("WriteFile failed: %d", GetLastError());
-		system("pause");
 		return -1;
 	}
+	while (true)
+	{
+		char szBufRecv[1024] = { 0 };
+		DWORD dwReadSize = 0;
+		BOOL bRet = ::ReadFile(hPipe, szBufRecv, 1024, &dwReadSize, NULL);
+		if (!bRet || dwReadSize == 0)
+		{
+			DWORD dwLastError = ::GetLastError();
+			if (dwLastError == ERROR_PIPE_LISTENING)
+				continue;
+			else
+				break;
+		}
+	}
 
-	// Pipe should close by client
-	//::CloseHandle(hPipe);
+	::CloseHandle(hPipe);
 
-	system("pause");
-
+	printf("Done.\n");
 	return 0;
 }

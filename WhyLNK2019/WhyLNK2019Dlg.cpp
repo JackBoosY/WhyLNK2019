@@ -9,7 +9,11 @@
 
 #include <process.h>
 #include <vector>
+#include <sstream>
+#include <fstream>
 #include <windows.h>
+#include <atlconv.h>
+#include <json/json.h>
 
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -176,6 +180,10 @@ BOOL CWhyLNK2019Dlg::OnInitDialog()
 	m_cbArch.SetCurSel(0);
 	// Check this machine's arch
 	m_arch = GetSysArch();
+
+	//test
+	m_editLibname.SetWindowTextW(L"fmt.dll");
+	m_editLibpath.SetWindowTextW(L"F:\\vcpkg\\installed\\x86-windows\\bin");
 	return TRUE;  // return TRUE  unless you set the focus to a control
 }
 
@@ -257,23 +265,11 @@ void CWhyLNK2019Dlg::OnBnClickedButtonRun()
 	}
 
 	// Launch analysis exe
-	m_arch; m_tarArch;
-
-	CString strCmd;
-	//strCmd += strExeName;
-	strCmd += " \"";
-	strCmd += m_strLibname;
-	strCmd += "\" \"";
-	strCmd += m_strLibpath;
-	strCmd += "\" \"";
-	strCmd += strFunctions;
-	strCmd += "\"";
-
 	STARTUPINFO si = { sizeof(si) };
 	memset(&si, 0, sizeof(STARTUPINFO));
 	PROCESS_INFORMATION info;
 	memset(&info, 0, sizeof(PROCESS_INFORMATION));
-	if (!::CreateProcessW(strExeName, (LPWSTR)(LPCTSTR)strCmd, NULL, NULL, FALSE, NULL/*CREATE_NO_WINDOW*/, NULL, NULL, &si, &info))
+	if (!::CreateProcessW(strExeName, NULL, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &info))
 	{
 		int i = GetLastError();
 		return;
@@ -281,46 +277,125 @@ void CWhyLNK2019Dlg::OnBnClickedButtonRun()
 
 	// Connect to pipe
 	HANDLE hPipe = INVALID_HANDLE_VALUE;
-	hPipe = CreateFile(L"\\\\.\\pipe\\WhyLNK2019", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+	for (auto i = 0; i < 3; i++)
+	{
+		hPipe = CreateFile(L"\\\\.\\pipe\\WhyLNK2019", GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+
+		if (hPipe == INVALID_HANDLE_VALUE)
+		{
+			// Wait for client open pipe.
+			Sleep(200);
+			continue;
+		}
+		else
+		{
+			break;
+		}
+	}
 
 	if (hPipe == INVALID_HANDLE_VALUE)
 	{
-		printf("Create File error: %d", GetLastError());
+		int iError = GetLastError();
+		m_editResult.SetWindowTextW(L"analysis failed: Create pipe failed.");
 		return;
 	}
 
+	// Send params to client
+	Json::Value root;
+	root["srcArch"] = m_arch;
+	root["dstArch"] = m_tarArch;
+	root["libName"] = (const char*)_bstr_t((LPCTSTR)m_strLibname);
+	root["libPath"] = (const char*)_bstr_t((LPCTSTR)m_strLibpath);
+	root["Functions"] = (const char*)_bstr_t((LPCTSTR)strFunctions);
+	std::ostringstream ss;
+	Json::StreamWriterBuilder writer;
+	std::unique_ptr<Json::StreamWriter> write(writer.newStreamWriter());
+	write->write(root, &ss);
+
+	DWORD dwWritten = 0;
+	BOOL bRet = WriteFile(hPipe, ss.str().c_str(), ss.str().length() + 1, &dwWritten, NULL);
+	if (!bRet || dwWritten == 0)
+	{
+		m_editResult.SetWindowTextW(L"analysis failed: Send params failed.");
+		return;
+	}
+
+	// Read results from pipe
 	wchar_t* wCmd = NULL;
+	std::string strResult;
+	char szBufRecv[1024] = { 0 };
+	DWORD dwReadSize = 0;
 	while (true)
 	{
-		char szBufRecv[1024] = { 0 };
-		DWORD dwReadSize = 0;
-		BOOL bRet = ::ReadFile(hPipe, szBufRecv, 1024, &dwReadSize, NULL);
-		if (!bRet || dwReadSize == 0)
+		BOOL bRet = ::ReadFile(hPipe, szBufRecv, 1023, &dwReadSize, NULL);
+		if (!bRet)
 		{
 			DWORD dwLastError = ::GetLastError();
 			if (dwLastError == ERROR_PIPE_LISTENING)
 				continue;
 			else
 			{
+				DWORD dwWriteSize = 0;
+				::WriteFile(hPipe, "done", strlen("done") + 1, &dwWriteSize, NULL);
 				::CloseHandle(hPipe);
 				m_editResult.SetWindowTextW(L"analysis failed: Read result failed.");
 				return;
 			}
 		}
-		if (dwReadSize)
+		else if (dwReadSize == 0 || dwReadSize < 1023)
 		{
-			CloseHandle(hPipe);
-			const size_t cSize = strlen(szBufRecv) + 1;
-			wCmd = new wchar_t[cSize];
-			mbstowcs(wCmd, szBufRecv, cSize);
+			DWORD dwWriteSize = 0;
+			::WriteFile(hPipe, "done", strlen("done") + 1, &dwWriteSize, NULL);
+			::CloseHandle(hPipe);
+			strResult += szBufRecv;
 			break;
+		}
+		else
+		{
+			DWORD dwWriteSize = 0;
+			::WriteFile(hPipe, "done", strlen("done") + 1, &dwWriteSize, NULL);
+			strResult += szBufRecv;
+		}
+	}
+
+	// Parse return results.
+	Json::Value rsltRoot;
+	Json::CharReaderBuilder builder;
+	builder["collectComments"] = false;
+	std::istringstream ifs(strResult);
+	std::string strError;
+	printf("Parsing params...\n");
+	if (!parseFromStream(builder, ifs, &rsltRoot, &strError))
+	{
+		m_editResult.SetWindowTextW(L"analysis failed: parse result error.");
+		return;
+	}
+
+	CString strOut;
+	int iError = rsltRoot["Ret"].asInt();
+	if (0 == iError)
+	{
+		strOut = L"analysis success:\r\n";
+		Json::Value::Members mem = rsltRoot["Result"].getMemberNames();
+		for (auto i = mem.begin(); i != mem.end(); i++)
+		{
+			const size_t cSize = strlen(i->c_str()) + 1;
+			wchar_t* wc = new wchar_t[cSize];
+			mbstowcs(wc, i->c_str(), cSize);
+			strOut += wc;
+			delete[] wc;
+
+			strOut += L": ";
+
+			strOut += (rsltRoot["Result"][*i].asBool() ? L"Success\r\n" : L"Failed\r\n");
 		}
 
 	}
+	else
+	{
+		strOut = L"analysis failed.";
+	}
 
 	// Output results
-	CString strOut = L"analysis success:";
-	strOut += wCmd;
-	delete[] wCmd;
 	m_editResult.SetWindowTextW(strOut);
 }
