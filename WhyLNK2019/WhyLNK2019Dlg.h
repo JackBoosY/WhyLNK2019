@@ -3,14 +3,7 @@
 //
 
 #pragma once
-
-#include <map>
-
-typedef enum _en_arch
-{
-	EN_X86,
-	EN_X64
-}en_arch;
+#include "AnalysisRunner.h"
 
 
 // CWhyLNK2019Dlg dialog
@@ -30,8 +23,6 @@ public:
 
 protected:
 	BOOL CheckVars();
-	en_arch GetSysArch();
-	BOOL AnaylsisErrors(std::map<CString, CString>& functions);
 
 // Implementation
 protected:
@@ -60,4 +51,5 @@ private:
 	CString m_strLibpath;
 	CString m_strErrors;
 	en_arch m_tarArch;
+	AnalysisRunner m_runner;
 };
